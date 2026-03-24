@@ -1,0 +1,17 @@
+# data files
+dataset/**
+!dataset/**/README.md
+# log files
+log/**
+!log/**/.placeholder
+# model files
+*.pt
+*.ply
+# temp files
+*.pyc
+.vscode
+build
+*.egg-info
+__pycache__
+# dlc scripts
+dlc_scripts/**
