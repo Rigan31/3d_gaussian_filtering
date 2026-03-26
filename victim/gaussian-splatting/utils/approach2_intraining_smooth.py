@@ -1,62 +1,3 @@
-"""
-approach2_intraining_smooth.py
-
-Approach 2 -- In-training 3D smoothing defense.
-
-Plugs into the 3DGS training loop (benchmark.py) and applies spatial
-smoothing to Gaussian attributes after every densification step.
-
-Smoothable attributes (select via constructor argument 'targets'):
-    rgb      -- DC colour (f_dc), the primary colour corrupted by adversarial noise
-    opacity  -- raw opacity values, attenuates transparent noise Gaussians
-    xyz      -- positions (optional)
-
-Filters (select via constructor argument 'method'):
-    gaussian   -- Gaussian-weighted mean of k nearest neighbours
-    median     -- Geometric median of k nearest neighbours
-    bilateral  -- Edge-preserving: spatial distance + colour similarity
-
-How to integrate into benchmark.py
-------------------------------------
-Step 1 -- import at the top of benchmark.py:
-
-    from approach2_intraining_smooth import GaussianSmoothingDefense
-
-Step 2 -- create the defense object before the training loop:
-
-    smooth_defense = GaussianSmoothingDefense(
-        method  = "gaussian",         # "gaussian" | "median" | "bilateral"
-        targets = ["rgb", "opacity"], # what to smooth
-        k       = 10,
-        sigma   = 0.05,
-        sigma_c = 0.1,                # bilateral only
-    )
-
-Step 3 -- call it right after densify_and_prune inside the training loop:
-
-    if iteration in densification_iterations:
-        gaussians.densify_and_prune(...)
-        smooth_defense.step(gaussians, iteration)   # <-- add this one line
-
-Design notes
-------------
-- Smoothing is done inside torch.no_grad() with in-place .copy_() so the
-  optimizer's momentum and variance buffers for each parameter are preserved.
-  Replacing a tensor with a new one would lose those buffers and destabilize
-  training -- copy_() avoids that entirely.
-
-- The KD-tree is built from XYZ positions each time (to find spatial
-  neighbours), even if xyz is not in targets. Positions define the
-  neighbourhood; what we update is controlled by targets.
-
-- Bilateral weighting always uses current RGB colour similarity to compute
-  edge-preserving weights, regardless of whether rgb is in targets.
-
-Requirements
-------------
-    pip install numpy scipy tqdm
-"""
-
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
@@ -76,28 +17,8 @@ def _geometric_median(points, n_iter=10):
     return m
 
 
-# ---------------------------------------------------------------------------
-# Main defense class
-# ---------------------------------------------------------------------------
 
 class GaussianSmoothingDefense:
-    """
-    In-training smoothing defense for 3DGS.
-
-    Parameters
-    ----------
-    method   : "gaussian" | "median" | "bilateral"
-    targets  : list of attributes to smooth.
-               Options: "rgb", "opacity", "xyz"
-               Default: ["rgb", "opacity"]
-               Note: xyz positions are always used to build the KD-tree
-               (spatial neighbourhood), but only updated if "xyz" is in targets.
-    k        : number of nearest neighbours
-    sigma    : spatial bandwidth for gaussian / bilateral kernels
-    sigma_c  : colour bandwidth for bilateral kernel
-    verbose  : print per-call statistics
-    """
-
     def __init__(
         self,
         method:  str   = "gaussian",
@@ -128,15 +49,6 @@ class GaussianSmoothingDefense:
     # ------------------------------------------------------------------
 
     def step(self, gaussians, iteration: int):
-        """
-        Apply smoothing to the Gaussian model right now.
-        Call this once after each densify_and_prune call.
-
-        Parameters
-        ----------
-        gaussians : GaussianModel instance from the 3DGS codebase
-        iteration : current training iteration (for logging only)
-        """
         self._n_calls += 1
         n = gaussians.get_xyz.shape[0]
 
@@ -191,12 +103,7 @@ class GaussianSmoothingDefense:
             with torch.no_grad():
                 gaussians._opacity.copy_(new_t)
 
-    # ------------------------------------------------------------------
-    # Filters
-    # ------------------------------------------------------------------
-
     def _gaussian(self, xyz, rgb, opacity, dists, idx):
-        """Gaussian-weighted mean: weight = exp(-d^2 / 2*sigma^2)"""
         weights = np.exp(-(dists ** 2) / (2 * self.sigma ** 2))  # (N, k)
         w_sum   = weights.sum(axis=1, keepdims=True) + 1e-8
         results = {}
@@ -219,7 +126,6 @@ class GaussianSmoothingDefense:
         return results
 
     def _median(self, xyz, rgb, opacity, idx):
-        """Geometric median of k neighbours (robust to outliers)."""
         results = {}
 
         if "xyz" in self.targets:
@@ -244,11 +150,7 @@ class GaussianSmoothingDefense:
         return results
 
     def _bilateral(self, xyz, rgb, opacity, dists, idx):
-        """
-        Edge-preserving smooth.
-        weight = exp(-d_space^2/2*ss^2) * exp(-d_colour^2/2*sc^2)
-        Preserves colour/opacity boundaries, smooths within flat regions.
-        """
+
         w_space = np.exp(-(dists ** 2) / (2 * self.sigma ** 2))  # (N, k)
 
         new_xyz     = xyz.copy()
@@ -277,10 +179,6 @@ class GaussianSmoothingDefense:
         if "opacity" in self.targets: results["opacity"] = new_opacity
         return results
 
-    # ------------------------------------------------------------------
-    # Tensor extraction helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _get_xyz(gaussians):
         return gaussians.get_xyz.detach().cpu().numpy().astype(np.float32)
@@ -297,10 +195,6 @@ class GaussianSmoothingDefense:
         # _opacity is raw (pre-sigmoid), shape (N, 1)
         raw = gaussians._opacity.detach().cpu().numpy()[:, 0]
         return (1.0 / (1.0 + np.exp(-raw))).astype(np.float32)
-
-    # ------------------------------------------------------------------
-    # Logging
-    # ------------------------------------------------------------------
 
     def _report(self, label, old, new):
         if self.verbose:
